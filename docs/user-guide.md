@@ -187,11 +187,32 @@ If you want to do the planning on the web with Claude (Sonnet 4 or Opus), Gemini
 npx bmad-method install
 ```
 
-## Special Agents
+## Available Agents
 
-There are two BMad agents — in the future they'll be consolidated into a single BMad-Master.
+BMAD includes a comprehensive set of specialized agents for different phases of development:
 
-### BMad-Master
+### Core Planning & Development Agents
+
+- **analyst** - Business requirements analysis and PRD creation
+- **pm** - Product management and feature prioritization
+- **architect** - System architecture and technical design
+- **po** - Product owner for story management
+- **sm** - Scrum master for sprint coordination
+- **dev** - Development implementation
+- **qa** - Quality assurance and testing
+- **ux-expert** - User experience design
+
+### Enhanced Specialized Agents (New)
+
+- **rapid-prototyper** - Quick MVP creation and proof-of-concepts
+- **backend-specialist** - API design, databases, and scalable systems
+- **test-engineer** - Comprehensive test automation and maintenance
+- **trend-analyst** - Market research and opportunity identification
+- **growth-strategist** - User acquisition and viral growth mechanics
+
+### Special Orchestration Agents
+
+#### BMad-Master
 
 This agent can do any task or command that all other agents can do, aside from actual story implementation. Additionally, this agent can help explain the BMad Method when on the web by accessing the knowledge base and explaining anything to you about the process.
 
