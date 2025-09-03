@@ -27,6 +27,22 @@ roo-permissions:
   sm:
     fileRegex: "\\.(md|txt)$"
     description: "Process and planning docs"
+  # New specialized agents
+  rapid-prototyper:
+    fileRegex: ".*"
+    description: "Full access for rapid MVP development"
+  test-engineer:
+    fileRegex: "\\.(test|spec)\\.(js|ts|jsx|tsx|py|rb|go)$|\\.(md|txt)$"
+    description: "Test files across all languages and docs"
+  trend-analyst:
+    fileRegex: "\\.(md|txt|json|yaml|yml)$"
+    description: "Market research and analysis docs"
+  growth-strategist:
+    fileRegex: "\\.(md|txt|json|yaml|yml)$"
+    description: "Growth strategy and analytics docs"
+  backend-specialist:
+    fileRegex: ".*"
+    description: "Full access for backend architecture"
   # Expansion pack agents
   game-designer:
     fileRegex: "\\.(md|txt|json|yaml|yml)$"
@@ -50,9 +66,15 @@ cline-order:
   dev: 8
   qa: 9
   ux-expert: 10
+  # New specialized agents
+  rapid-prototyper: 11
+  backend-specialist: 12
+  test-engineer: 13
+  trend-analyst: 14
+  growth-strategist: 15
   # Expansion pack agents
-  bmad-the-creator: 11
-  game-designer: 12
-  game-developer: 13
-  game-sm: 14
-  infra-devops-platform: 15
+  bmad-the-creator: 16
+  game-designer: 17
+  game-developer: 18
+  game-sm: 19
+  infra-devops-platform: 20
