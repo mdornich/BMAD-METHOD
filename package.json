@@ -64,6 +64,9 @@
       "markdownlint-cli2"
     ]
   },
+  "overrides": {
+    "qs": "^6.14.1"
+  },
   "dependencies": {
     "@kayvan/markdown-tree-parser": "^1.6.1",
     "boxen": "^5.1.2",
