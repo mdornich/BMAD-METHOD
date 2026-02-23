@@ -1,79 +1,21 @@
 const path = require('node:path');
-const fs = require('fs-extra');
 const os = require('node:os');
-const chalk = require('chalk');
+const fs = require('fs-extra');
+const yaml = require('yaml');
 const { BaseIdeSetup } = require('./_base-ide');
 const { WorkflowCommandGenerator } = require('./shared/workflow-command-generator');
 const { AgentCommandGenerator } = require('./shared/agent-command-generator');
+const { TaskToolCommandGenerator } = require('./shared/task-tool-command-generator');
 const { getTasksFromBmad } = require('./shared/bmad-artifacts');
+const { toDashPath, customAgentDashName } = require('./shared/path-utils');
+const prompts = require('../../../lib/prompts');
 
 /**
  * Codex setup handler (CLI mode)
  */
 class CodexSetup extends BaseIdeSetup {
   constructor() {
-    super('codex', 'Codex', true); // preferred IDE
-  }
-
-  /**
-   * Collect configuration choices before installation
-   * @param {Object} options - Configuration options
-   * @returns {Object} Collected configuration
-   */
-  async collectConfiguration(options = {}) {
-    const inquirer = require('inquirer').default || require('inquirer');
-
-    let confirmed = false;
-    let installLocation = 'global';
-
-    while (!confirmed) {
-      const { location } = await inquirer.prompt([
-        {
-          type: 'list',
-          name: 'location',
-          message: 'Where would you like to install Codex CLI prompts?',
-          choices: [
-            {
-              name: 'Global - Simple for single project ' + '(~/.codex/prompts, but references THIS project only)',
-              value: 'global',
-            },
-            {
-              name: `Project-specific - Recommended for real work (requires CODEX_HOME=<project-dir>${path.sep}.codex)`,
-              value: 'project',
-            },
-          ],
-          default: 'global',
-        },
-      ]);
-
-      installLocation = location;
-
-      // Display detailed instructions for the chosen option
-      console.log('');
-      if (installLocation === 'project') {
-        console.log(this.getProjectSpecificInstructions());
-      } else {
-        console.log(this.getGlobalInstructions());
-      }
-
-      // Confirm the choice
-      const { proceed } = await inquirer.prompt([
-        {
-          type: 'confirm',
-          name: 'proceed',
-          message: 'Proceed with this installation option?',
-          default: true,
-        },
-      ]);
-
-      confirmed = proceed;
-
-      if (!confirmed) {
-        console.log(chalk.yellow("\n  Let's choose a different installation option.\n"));
-      }
-    }
-
-    return { installLocation };
+    super('codex', 'Codex', false);
   }
 
   /**
@@ -83,31 +25,72 @@ class CodexSetup extends BaseIdeSetup {
    * @param {Object} options - Setup options
    */
   async setup(projectDir, bmadDir, options = {}) {
-    console.log(chalk.cyan(`Setting up ${this.name}...`));
+    if (!options.silent) await prompts.log.info(`Setting up ${this.name}...`);
 
     // Always use CLI mode
     const mode = 'cli';
 
-    // Get installation location from pre-collected config or default to global
-    const installLocation = options.preCollectedConfig?.installLocation || 'global';
-
     const { artifacts, counts } = await this.collectClaudeArtifacts(projectDir, bmadDir, options);
 
-    const destDir = this.getCodexPromptDir(projectDir, installLocation);
-    await fs.ensureDir(destDir);
-    await this.clearOldBmadFiles(destDir);
-    const written = await this.flattenAndWriteArtifacts(artifacts, destDir);
+    // Clean up old .codex/prompts locations (both global and project)
+    const oldGlobalDir = this.getOldCodexPromptDir(null, 'global');
+    await this.clearOldBmadFiles(oldGlobalDir, options);
+    const oldProjectDir = this.getOldCodexPromptDir(projectDir, 'project');
+    await this.clearOldBmadFiles(oldProjectDir, options);
 
-    console.log(chalk.green(`✓ ${this.name} configured:`));
-    console.log(chalk.dim(`  - Mode: CLI`));
-    console.log(chalk.dim(`  - ${counts.agents} agents exported`));
-    console.log(chalk.dim(`  - ${counts.tasks} tasks exported`));
-    console.log(chalk.dim(`  - ${counts.workflows} workflow commands exported`));
-    if (counts.workflowLaunchers > 0) {
-      console.log(chalk.dim(`  - ${counts.workflowLaunchers} workflow launchers exported`));
+    // Install to .agents/skills
+    const destDir = this.getCodexSkillsDir(projectDir);
+    await fs.ensureDir(destDir);
+    await this.clearOldBmadSkills(destDir, options);
+
+    // Collect and write agent skills
+    const agentGen = new AgentCommandGenerator(this.bmadFolderName);
+    const { artifacts: agentArtifacts } = await agentGen.collectAgentArtifacts(bmadDir, options.selectedModules || []);
+    const agentCount = await this.writeSkillArtifacts(destDir, agentArtifacts, 'agent-launcher');
+
+    // Collect and write task skills
+    const tasks = await getTasksFromBmad(bmadDir, options.selectedModules || []);
+    const taskArtifacts = [];
+    for (const task of tasks) {
+      const content = await this.readAndProcessWithProject(
+        task.path,
+        {
+          module: task.module,
+          name: task.name,
+        },
+        projectDir,
+      );
+      taskArtifacts.push({
+        type: 'task',
+        name: task.name,
+        displayName: task.name,
+        module: task.module,
+        path: task.path,
+        sourcePath: task.path,
+        relativePath: path.join(task.module, 'tasks', `${task.name}.md`),
+        content,
+      });
     }
-    console.log(chalk.dim(`  - ${written} Codex prompt files written`));
-    console.log(chalk.dim(`  - Destination: ${destDir}`));
+
+    const ttGen = new TaskToolCommandGenerator(this.bmadFolderName);
+    const taskSkillArtifacts = taskArtifacts.map((artifact) => ({
+      ...artifact,
+      content: ttGen.generateCommandContent(artifact, artifact.type),
+    }));
+    const tasksWritten = await this.writeSkillArtifacts(destDir, taskSkillArtifacts, 'task');
+
+    // Collect and write workflow skills
+    const workflowGenerator = new WorkflowCommandGenerator(this.bmadFolderName);
+    const { artifacts: workflowArtifacts } = await workflowGenerator.collectWorkflowArtifacts(bmadDir);
+    const workflowCount = await this.writeSkillArtifacts(destDir, workflowArtifacts, 'workflow-command');
+
+    const written = agentCount + workflowCount + tasksWritten;
+
+    if (!options.silent) {
+      await prompts.log.success(
+        `${this.name} configured: ${counts.agents} agents, ${counts.workflows} workflows, ${counts.tasks} tasks, ${written} skills → ${destDir}`,
+      );
+    }
 
     return {
       success: true,
@@ -116,32 +99,23 @@ class CodexSetup extends BaseIdeSetup {
       counts,
       destination: destDir,
       written,
-      installLocation,
     };
   }
 
   /**
-   * Detect Codex installation by checking for BMAD prompt exports
+   * Detect Codex installation by checking for BMAD skills
    */
   async detect(projectDir) {
-    // Check both global and project-specific locations
-    const globalDir = this.getCodexPromptDir(null, 'global');
-    const projectDir_local = projectDir || process.cwd();
-    const projectSpecificDir = this.getCodexPromptDir(projectDir_local, 'project');
+    const dir = this.getCodexSkillsDir(projectDir || process.cwd());
 
-    // Check global location
-    if (await fs.pathExists(globalDir)) {
-      const entries = await fs.readdir(globalDir);
-      if (entries.some((entry) => entry.startsWith('bmad-'))) {
-        return true;
-      }
-    }
-
-    // Check project-specific location
-    if (await fs.pathExists(projectSpecificDir)) {
-      const entries = await fs.readdir(projectSpecificDir);
-      if (entries.some((entry) => entry.startsWith('bmad-'))) {
-        return true;
+    if (await fs.pathExists(dir)) {
+      try {
+        const entries = await fs.readdir(dir);
+        if (entries && entries.some((entry) => entry && typeof entry === 'string' && entry.startsWith('bmad'))) {
+          return true;
+        }
+      } catch {
+        // Ignore errors
       }
     }
 
@@ -183,7 +157,10 @@ class CodexSetup extends BaseIdeSetup {
 
       artifacts.push({
         type: 'task',
+        name: task.name,
+        displayName: task.name,
         module: task.module,
+        path: task.path,
         sourcePath: task.path,
         relativePath: path.join(task.module, 'tasks', `${task.name}.md`),
         content,
@@ -205,77 +182,180 @@ class CodexSetup extends BaseIdeSetup {
     };
   }
 
-  getCodexPromptDir(projectDir = null, location = 'global') {
+  getCodexSkillsDir(projectDir) {
+    if (!projectDir) {
+      throw new Error('projectDir is required for project-scoped skill installation');
+    }
+    return path.join(projectDir, '.agents', 'skills');
+  }
+
+  /**
+   * Get the old .codex/prompts directory for cleanup purposes
+   */
+  getOldCodexPromptDir(projectDir = null, location = 'global') {
     if (location === 'project' && projectDir) {
       return path.join(projectDir, '.codex', 'prompts');
     }
     return path.join(os.homedir(), '.codex', 'prompts');
   }
 
-  async flattenAndWriteArtifacts(artifacts, destDir) {
-    let written = 0;
+  /**
+   * Write artifacts as Agent Skills (agentskills.io format).
+   * Each artifact becomes a directory containing SKILL.md.
+   * @param {string} destDir - Base skills directory
+   * @param {Array} artifacts - Artifacts to write
+   * @param {string} artifactType - Type filter (e.g., 'agent-launcher', 'workflow-command', 'task')
+   * @returns {number} Number of skills written
+   */
+  async writeSkillArtifacts(destDir, artifacts, artifactType) {
+    let writtenCount = 0;
 
     for (const artifact of artifacts) {
-      const flattenedName = this.flattenFilename(artifact.relativePath);
-      const targetPath = path.join(destDir, flattenedName);
-      await fs.writeFile(targetPath, artifact.content);
-      written++;
+      // Filter by type if the artifact has a type field
+      if (artifact.type && artifact.type !== artifactType) {
+        continue;
+      }
+
+      // Get the dash-format name (e.g., bmad-bmm-create-prd.md) and remove .md
+      const flatName = toDashPath(artifact.relativePath);
+      const skillName = flatName.replace(/\.md$/, '');
+
+      // Create skill directory
+      const skillDir = path.join(destDir, skillName);
+      await fs.ensureDir(skillDir);
+
+      // Transform content: rewrite frontmatter for skills format
+      const skillContent = this.transformToSkillFormat(artifact.content, skillName);
+
+      // Write SKILL.md with platform-native line endings
+      const platformContent = skillContent.replaceAll('\n', os.EOL);
+      await fs.writeFile(path.join(skillDir, 'SKILL.md'), platformContent, 'utf8');
+      writtenCount++;
     }
 
-    return written;
+    return writtenCount;
   }
 
-  async clearOldBmadFiles(destDir) {
+  /**
+   * Transform artifact content from Codex prompt format to Agent Skills format.
+   * Removes disable-model-invocation, ensures name matches directory.
+   * @param {string} content - Original content with YAML frontmatter
+   * @param {string} skillName - Skill name (must match directory name)
+   * @returns {string} Transformed content
+   */
+  transformToSkillFormat(content, skillName) {
+    // Normalize line endings so body matches rebuilt frontmatter (both LF)
+    content = content.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+
+    // Parse frontmatter
+    const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+    if (!fmMatch) {
+      // No frontmatter -- wrap with minimal frontmatter
+      const fm = yaml.stringify({ name: skillName, description: skillName }).trimEnd();
+      return `---\n${fm}\n---\n\n${content}`;
+    }
+
+    const frontmatter = fmMatch[1];
+    const body = fmMatch[2];
+
+    // Parse frontmatter with yaml library to handle all quoting variants
+    let description;
+    try {
+      const parsed = yaml.parse(frontmatter);
+      description = parsed?.description || `${skillName} skill`;
+    } catch {
+      description = `${skillName} skill`;
+    }
+
+    // Build new frontmatter with only skills-spec fields, let yaml handle quoting
+    const newFrontmatter = yaml.stringify({ name: skillName, description }, { lineWidth: 0 }).trimEnd();
+    return `---\n${newFrontmatter}\n---\n${body}`;
+  }
+
+  /**
+   * Remove existing BMAD skill directories from the skills directory.
+   */
+  async clearOldBmadSkills(destDir, options = {}) {
     if (!(await fs.pathExists(destDir))) {
       return;
     }
 
-    const entries = await fs.readdir(destDir);
+    let entries;
+    try {
+      entries = await fs.readdir(destDir);
+    } catch (error) {
+      if (!options.silent) await prompts.log.warn(`Warning: Could not read directory ${destDir}: ${error.message}`);
+      return;
+    }
+
+    if (!entries || !Array.isArray(entries)) {
+      return;
+    }
 
     for (const entry of entries) {
-      if (!entry.startsWith('bmad-')) {
+      if (!entry || typeof entry !== 'string') {
+        continue;
+      }
+      if (!entry.startsWith('bmad')) {
         continue;
       }
 
       const entryPath = path.join(destDir, entry);
-      const stat = await fs.stat(entryPath);
-      if (stat.isFile()) {
+      try {
         await fs.remove(entryPath);
-      } else if (stat.isDirectory()) {
+      } catch (error) {
+        if (!options.silent) {
+          await prompts.log.message(`  Skipping ${entry}: ${error.message}`);
+        }
+      }
+    }
+  }
+
+  /**
+   * Clean old BMAD files from legacy .codex/prompts directories.
+   */
+  async clearOldBmadFiles(destDir, options = {}) {
+    if (!(await fs.pathExists(destDir))) {
+      return;
+    }
+
+    let entries;
+    try {
+      entries = await fs.readdir(destDir);
+    } catch (error) {
+      // Directory exists but can't be read - skip cleanup
+      if (!options.silent) await prompts.log.warn(`Warning: Could not read directory ${destDir}: ${error.message}`);
+      return;
+    }
+
+    if (!entries || !Array.isArray(entries)) {
+      return;
+    }
+
+    for (const entry of entries) {
+      // Skip non-strings or undefined entries
+      if (!entry || typeof entry !== 'string') {
+        continue;
+      }
+      if (!entry.startsWith('bmad')) {
+        continue;
+      }
+
+      const entryPath = path.join(destDir, entry);
+      try {
         await fs.remove(entryPath);
+      } catch (error) {
+        if (!options.silent) {
+          await prompts.log.message(`  Skipping ${entry}: ${error.message}`);
+        }
       }
     }
   }
 
   async readAndProcessWithProject(filePath, metadata, projectDir) {
-    const content = await fs.readFile(filePath, 'utf8');
+    const rawContent = await fs.readFile(filePath, 'utf8');
+    const content = rawContent.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
     return super.processContent(content, metadata, projectDir);
-  }
-
-  /**
-   * Get instructions for global installation
-   * @returns {string} Instructions text
-   */
-  getGlobalInstructions(destDir) {
-    const lines = [
-      '',
-      chalk.bold.cyan('═'.repeat(70)),
-      chalk.bold.yellow('  IMPORTANT: Codex Configuration'),
-      chalk.bold.cyan('═'.repeat(70)),
-      '',
-      chalk.white('  /prompts installed globally to your HOME DIRECTORY.'),
-      '',
-      chalk.yellow('  ⚠️  These prompts reference a specific _bmad path'),
-      chalk.dim("  To use with other projects, you'd need to copy the _bmad dir"),
-      '',
-      chalk.green('  ✓ You can now use /commands in Codex CLI'),
-      chalk.dim('    Example: /bmad-bmm-agents-pm'),
-      chalk.dim('    Type / to see all available commands'),
-      '',
-      chalk.bold.cyan('═'.repeat(70)),
-      '',
-    ];
-    return lines.join('\n');
   }
 
   /**
@@ -285,102 +365,74 @@ class CodexSetup extends BaseIdeSetup {
    * @returns {string} Instructions text
    */
   getProjectSpecificInstructions(projectDir = null, destDir = null) {
-    const isWindows = os.platform() === 'win32';
-
-    const commonLines = [
+    const lines = [
+      'Project-Specific Codex Configuration',
       '',
-      chalk.bold.cyan('═'.repeat(70)),
-      chalk.bold.yellow('  Project-Specific Codex Configuration'),
-      chalk.bold.cyan('═'.repeat(70)),
+      `Skills installed to: ${destDir || '<project>/.agents/skills'}`,
       '',
-      chalk.white('  Prompts will be installed to: ') + chalk.cyan(destDir || '<project>/.codex/prompts'),
-      '',
-      chalk.bold.yellow('  ⚠️  REQUIRED: You must set CODEX_HOME to use these prompts'),
-      '',
+      'Codex automatically discovers skills in .agents/skills/ at and above the current directory and in your home directory.',
+      'No additional configuration is needed.',
     ];
-
-    const windowsLines = [
-      chalk.bold('  Create a codex.cmd file in your project root:'),
-      '',
-      chalk.green('    @echo off'),
-      chalk.green('    set CODEX_HOME=%~dp0.codex'),
-      chalk.green('    codex %*'),
-      '',
-      chalk.dim(String.raw`  Then run: .\codex instead of codex`),
-      chalk.dim('  (The %~dp0 gets the directory of the .cmd file)'),
-    ];
-
-    const unixLines = [
-      chalk.bold('  Add this alias to your ~/.bashrc or ~/.zshrc:'),
-      '',
-      chalk.green('    alias codex=\'CODEX_HOME="$PWD/.codex" codex\''),
-      '',
-      chalk.dim('  After adding, run: source ~/.bashrc  (or source ~/.zshrc)'),
-      chalk.dim('  (The $PWD uses your current working directory)'),
-    ];
-    const closingLines = [
-      '',
-      chalk.dim('  This tells Codex CLI to use prompts from this project instead of ~/.codex'),
-      '',
-      chalk.bold.cyan('═'.repeat(70)),
-      '',
-    ];
-
-    const lines = [...commonLines, ...(isWindows ? windowsLines : unixLines), ...closingLines];
 
     return lines.join('\n');
   }
 
   /**
-   * Cleanup Codex configuration
+   * Cleanup Codex configuration - cleans both new .agents/skills and old .codex/prompts
    */
   async cleanup(projectDir = null) {
-    // Clean both global and project-specific locations
-    const globalDir = this.getCodexPromptDir(null, 'global');
-    await this.clearOldBmadFiles(globalDir);
+    // Clean old .codex/prompts locations
+    const oldGlobalDir = this.getOldCodexPromptDir(null, 'global');
+    await this.clearOldBmadFiles(oldGlobalDir);
 
     if (projectDir) {
-      const projectSpecificDir = this.getCodexPromptDir(projectDir, 'project');
-      await this.clearOldBmadFiles(projectSpecificDir);
+      const oldProjectDir = this.getOldCodexPromptDir(projectDir, 'project');
+      await this.clearOldBmadFiles(oldProjectDir);
+
+      // Clean new .agents/skills location
+      const destDir = this.getCodexSkillsDir(projectDir);
+      await this.clearOldBmadSkills(destDir);
     }
   }
 
   /**
-   * Install a custom agent launcher for Codex
-   * @param {string} projectDir - Project directory (not used, Codex installs to home)
+   * Install a custom agent launcher for Codex as an Agent Skill
+   * @param {string} projectDir - Project directory
    * @param {string} agentName - Agent name (e.g., "fred-commit-poet")
    * @param {string} agentPath - Path to compiled agent (relative to project root)
    * @param {Object} metadata - Agent metadata
-   * @returns {Object|null} Info about created command
+   * @returns {Object|null} Info about created skill
    */
   async installCustomAgentLauncher(projectDir, agentName, agentPath, metadata) {
-    const destDir = this.getCodexPromptDir(projectDir, 'project');
-    await fs.ensureDir(destDir);
+    const destDir = this.getCodexSkillsDir(projectDir);
 
-    const launcherContent = `---
-name: '${agentName}'
-description: '${agentName} agent'
----
+    // Skill name from the dash name (without .md)
+    const skillName = customAgentDashName(agentName).replace(/\.md$/, '');
+    const skillDir = path.join(destDir, skillName);
+    await fs.ensureDir(skillDir);
 
-You must fully embody this agent's persona and follow all activation instructions exactly as specified. NEVER break character until given an exit command.
+    const description = metadata?.description || `${agentName} agent`;
+    const fm = yaml.stringify({ name: skillName, description }).trimEnd();
+    const skillContent =
+      `---\n${fm}\n---\n` +
+      "\nYou must fully embody this agent's persona and follow all activation instructions exactly as specified. NEVER break character until given an exit command.\n" +
+      '\n<agent-activation CRITICAL="TRUE">\n' +
+      `1. LOAD the FULL agent file from @${agentPath}\n` +
+      '2. READ its entire contents - this contains the complete agent persona, menu, and instructions\n' +
+      '3. FOLLOW every step in the <activation> section precisely\n' +
+      '4. DISPLAY the welcome/greeting as instructed\n' +
+      '5. PRESENT the numbered menu\n' +
+      '6. WAIT for user input before proceeding\n' +
+      '</agent-activation>\n';
 
-<agent-activation CRITICAL="TRUE">
-1. LOAD the FULL agent file from @${agentPath}
-2. READ its entire contents - this contains the complete agent persona, menu, and instructions
-3. FOLLOW every step in the <activation> section precisely
-4. DISPLAY the welcome/greeting as instructed
-5. PRESENT the numbered menu
-6. WAIT for user input before proceeding
-</agent-activation>
-`;
-
-    const fileName = `bmad-custom-agents-${agentName}.md`;
-    const launcherPath = path.join(destDir, fileName);
-    await fs.writeFile(launcherPath, launcherContent, 'utf8');
+    // Write with platform-native line endings
+    const platformContent = skillContent.replaceAll('\n', os.EOL);
+    const skillPath = path.join(skillDir, 'SKILL.md');
+    await fs.writeFile(skillPath, platformContent, 'utf8');
 
     return {
-      path: path.relative(projectDir, launcherPath),
-      command: `/${fileName.replace('.md', '')}`,
+      path: path.relative(projectDir, skillPath),
+      command: `$${skillName}`,
     };
   }
 }

@@ -18,12 +18,6 @@ platforms:
     category: cli
     description: "Anthropic's official CLI for Claude"
 
-  windsurf:
-    name: "Windsurf"
-    preferred: true
-    category: ide
-    description: "AI-powered IDE with cascade flows"
-
   cursor:
     name: "Cursor"
     preferred: true
@@ -43,6 +37,12 @@ platforms:
     category: ide
     description: "OpenCode terminal coding assistant"
 
+  codebuddy:
+    name: "CodeBuddy"
+    preferred: false
+    category: ide
+    description: "Tencent Cloud Code Assistant - AI-powered coding companion"
+
   auggie:
     name: "Auggie"
     preferred: false
@@ -55,23 +55,17 @@ platforms:
     category: ide
     description: "Enhanced Cline fork"
 
-  rovo:
-    name: "Rovo"
-    preferred: false
-    category: ide
-    description: "Atlassian's AI coding assistant"
-
   rovo-dev:
     name: "Rovo Dev"
     preferred: false
     category: ide
     description: "Atlassian's Rovo development environment"
 
-  kiro-cli:
-    name: "Kiro CLI"
+  kiro:
+    name: "Kiro"
     preferred: false
-    category: cli
-    description: "Kiro command-line interface"
+    category: ide
+    description: "Amazon's AI-powered IDE"
 
   github-copilot:
     name: "GitHub Copilot"
@@ -126,6 +120,12 @@ platforms:
     preferred: false
     category: ide
     description: "AI coding tool"
+
+  windsurf:
+    name: "Windsurf"
+    preferred: false
+    category: ide
+    description: "AI-powered IDE with cascade flows"
 
 # Platform categories
 categories:
